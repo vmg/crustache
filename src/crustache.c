@@ -1,10 +1,12 @@
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <stdio.h>
 
 #include "crustache.h"
+#include "houdini.h"
 
-#define MAX_TEMPLATE_RECURSION 8
+#define MAX_RENDER_RECURSION 16
 
 typedef enum {
 	CRUSTACHE_NODE_MULTIROOT,
@@ -12,10 +14,16 @@ typedef enum {
 	CRUSTACHE_NODE_TAG,
 	CRUSTACHE_NODE_SECTION,
 	CRUSTACHE_NODE_FETCH
-} crustache_node_t;
+} node_t;
+
+typedef enum {
+	CRUSTACHE_TAG_ESCAPE,
+	CRUSTACHE_TAG_RAW,
+	CRUSTACHE_TAG_UNESCAPE,
+} tag_mode_t;
 
 struct node {
-	crustache_node_t type;
+	node_t type;
 	struct node *next;
 };
 
@@ -37,7 +45,7 @@ struct node_fetch {
 struct node_tag {
 	struct node base;
 	struct node *tag_value;
-	int flags;
+	tag_mode_t print_mode;
 };
 
 struct node_section {
@@ -60,16 +68,16 @@ struct crustache_template {
 		size_t size;
 	} mustache_open, mustache_close;
 
-	struct crustache_api api;
+	crustache_api api;
 
 	struct {
 		char *ptr;
 		size_t size;
 	} raw_content;
 
-	struct node root;
+	size_t error_pos;
 
-	int depth;
+	struct node root;
 };
 
 static void
@@ -103,7 +111,7 @@ print_tree(struct node *node, int depth)
 
 			case CRUSTACHE_NODE_TAG: {
 				struct node_tag *tag = (struct node_tag *)node;
-				printf("tag [%d] =>\n", tag->flags);
+				printf("tag [%d] =>\n", tag->print_mode);
 				print_tree(tag->tag_value, depth + 1);
 				break;
 			}
@@ -166,39 +174,6 @@ node_free(struct node *node)
 	}
 }
 
-static inline void
-html_putchar(struct buf *ob, char c)
-{
-	switch (c) {
-		case '<': BUFPUTSL(ob, "&lt;"); break;
-		case '>': BUFPUTSL(ob, "&gt;"); break;
-		case '&': BUFPUTSL(ob, "&amp;"); break;
-		case '"': BUFPUTSL(ob, "&quot;"); break;
-		default: bufputc(ob, c); break;
-	}
-}
-
-static void
-html_escape(struct buf *ob, const char *src, size_t size)
-{
-	size_t  i = 0, org;
-
-	while (i < size) {
-		org = i;
-		while (i < size && src[i] != '<' && src[i] != '>' && src[i] != '&' && src[i] != '"')
-			i++;
-
-		if (i > org)
-			bufput(ob, src + org, i - org);
-
-		/* escaping */
-		if (i >= size) break;
-
-		html_putchar(ob, src[i]);
-		i++;
-	}
-}
-
 static const char *
 railgun(
 	const char *target, size_t target_len,
@@ -213,12 +188,27 @@ railgun(
 	if (pattern_len > target_len)
 		return NULL;
 
+	if (pattern_len == 1) {
+		return memchr((void *)target, pattern[0], target_len);
+	}
+
+	if (pattern_len >= 4) {
+		const char *p;
+
+		for (p = target; p <= (target - pattern_len + target_len); p++) {
+			if (memcmp(p, pattern, pattern_len) == 0)
+				return p;
+		}
+
+		return NULL;
+	}
+
 	target = target + pattern_len;
 	hash_pattern = ((*(char *)(pattern)) << 8) + *(pattern + (pattern_len - 1));
 	count_static = pattern_len - 2;
 
 	for (;;) {
-		if (hash_pattern == ((*(char *)(target - pattern_len)) << 8) + *(target - 1)) {
+		if (hash_pattern == (unsigned)((*(char *)(target - pattern_len)) << 8) + *(target - 1)) {
 			count = count_static;
 			while (count && *(char *)(pattern + 1 + (count_static - count)) ==
 				*(char *)(target - pattern_len + 1 + (count_static - count))) {
@@ -240,7 +230,7 @@ static int
 find_mustache(
 	size_t *mst_pos,
 	size_t *mst_size,
-	struct crustache_template *template,
+	crustache_template *template,
 	size_t i,
 	const char *buffer,
 	size_t size)
@@ -249,8 +239,7 @@ find_mustache(
 	const char *mst_end;
 	
 	mst_start = railgun(
-		buffer + i,
-		size - i,
+		buffer + i, size - i,
 		template->mustache_open.chars,
 		template->mustache_open.size);
 
@@ -260,21 +249,41 @@ find_mustache(
 		return 0;
 	}
 
-	/* TODO: greedy matching */
-
 	mst_end = railgun(
-		buffer + i,
-		size - i,
+		buffer + i, size - i,
 		template->mustache_close.chars,
 		template->mustache_close.size);
 
-	if (mst_end == NULL || mst_end < mst_start)
-		return -1;
+	if (mst_end == mst_start) {
+		mst_end = railgun(
+			mst_start + template->mustache_open.size,
+			buffer + size - (template->mustache_open.size + mst_start),
+			template->mustache_close.chars,
+			template->mustache_close.size);
+	}
+
+	if (mst_end == NULL || mst_end < mst_start) {
+		template->error_pos = mst_end ? (mst_end - buffer) : (mst_start - buffer);
+		return CRUSTACHE_E_MISMATCHED_MUSTACHE;
+	}
+
+	/* Greedy matching */
+	if (mst_end + 1 == railgun(
+		mst_end + 1, buffer - mst_end,
+		template->mustache_close.chars,
+		template->mustache_close.size))
+		mst_end = mst_end + 1;
 
 	*mst_pos = mst_start - buffer;
 	*mst_size = mst_end + template->mustache_close.size - mst_start;
 
 	return 0;
+}
+
+static int
+tag_isspace(char c)
+{
+	return c == ' ' || c == '\t';
 }
 
 static int
@@ -299,49 +308,83 @@ parse_mustache(struct mustache *mst, const char *buffer, size_t size)
 				size--;
 		}
 
-		if (mst->modifier == '{' || mst->modifier == '=') {
-			if (!size || buffer[size - 1] != mst->modifier)
-				return -1;
+		if (mst->modifier == '{') {
+			if (!size || buffer[size - 1] != '}')
+				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
+			size--;
+		}
 
+		if (mst->modifier == '=') {
+			if (!size || buffer[size - 1] != '=')
+				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
 			size--;
 		}
 	}
 
-	while (size && isspace(buffer[0])) {
+	while (size && tag_isspace(buffer[0])) {
 		buffer++; size--;
 	}
 
-	while (size && isspace(buffer[size - 1]))
+	while (size && tag_isspace(buffer[size - 1]))
 		size--;
 
 	if (size == 0)
-		return -1;
+		return CRUSTACHE_E_BAD_MUSTACHE_NAME;
 
 	mst->name = buffer;
 	mst->size = size;
 	return 0;
 }
 
-static int parse_set_delim(struct crustache_template *template, struct mustache *mst)
+static int
+parse_set_delim(crustache_template *template, struct mustache *mst)
 {
 	const char *buffer = mst->name;
 	size_t size = mst->size;
-	
 	size_t open_size = 0;
+	size_t i;
 
-	while (open_size < size && !isspace(buffer[open_size])) {
-		if (buffer[open_size] == '=')
-			return -1;
+	while (open_size < size && !tag_isspace(buffer[open_size])) {
+		if (buffer[open_size] == '=' || buffer[open_size] == '\n')
+			return CRUSTACHE_E_INVALID_DELIM;
 
 		open_size++;
 	}
 
-	if (open_size == 0 || open_size == size || open_size >= 4)
-		return -1;
+	if (open_size == 0 || open_size == size)
+		return CRUSTACHE_E_INVALID_DELIM;
 
 	template->mustache_open.chars = buffer;
 	template->mustache_open.size = open_size;
-	/* TODO: closing delims */
+
+	size--;
+	while (size > 0 && !isspace(buffer[size])) {
+		if (buffer[size] == '=' || buffer[size] == '\n')
+			return CRUSTACHE_E_INVALID_DELIM;
+
+		size--;
+	}
+
+	size++;
+
+	if (size <= open_size)
+		return CRUSTACHE_E_INVALID_DELIM;
+
+	template->mustache_close.chars = buffer + size;
+	template->mustache_close.size = mst->size - size;
+
+	for (i = open_size; i < size; ++i)
+		if (!tag_isspace(buffer[i]))
+			return CRUSTACHE_E_INVALID_DELIM;
+
+#if 0
+	printf("Delim |%.*s| |%.*s|\n",
+		(int)template->mustache_open.size,
+		template->mustache_open.chars,
+		(int)template->mustache_close.size,
+		template->mustache_close.chars);
+#endif
+
 	return 0;
 }
 
@@ -352,7 +395,7 @@ parse_mustache_name(struct node_str *str, struct mustache *mst)
 
 	for (i = 0; i < mst->size; ++i) {
 		if (!isalnum(mst->name[i]) && mst->name[i] != '_')
-			return -1;
+			return CRUSTACHE_E_BAD_MUSTACHE_NAME;
 	}
 
 	str->ptr = mst->name;
@@ -362,28 +405,26 @@ parse_mustache_name(struct node_str *str, struct mustache *mst)
 
 static int
 parse_internal(
-	struct crustache_template *template,
+	crustache_template *template,
 	const char *buffer,
 	size_t size,
 	struct node *root_node)
 {
 	size_t i = 0;
-	int result;
+	int error = 0;
 
 	struct parray node_stack;
-
-	if (template->depth++ >= MAX_TEMPLATE_RECURSION)
-		return -1;
 
 	parr_init(&node_stack);
 	parr_push(&node_stack, root_node);
 
-	while (i < size) {
+	while (error == 0 && i < size) {
 		size_t mst_pos, mst_size;
 		struct mustache mst;
 
-		if (find_mustache(&mst_pos, &mst_size, template, i, buffer, size) < 0)
-			return -1;
+		error = find_mustache(&mst_pos, &mst_size, template, i, buffer, size);
+		if (error < 0)
+			break;
 
 		if (mst_pos > i) {
 			struct node_static *stnode;
@@ -405,10 +446,14 @@ parse_internal(
 		if (mst_pos == size)
 			break;
 
-		if (parse_mustache(&mst,
+		error = parse_mustache(&mst,
 			buffer + mst_pos + template->mustache_open.size,
-			mst_size - template->mustache_open.size - template->mustache_close.size) < 0)
-			return -1;
+			mst_size - template->mustache_open.size - template->mustache_close.size);
+
+		if (error < 0) {
+			template->error_pos = mst_pos;
+			break;
+		}
 
 		i = mst_pos + mst_size;
 
@@ -428,8 +473,9 @@ parse_internal(
 				section_key = malloc(sizeof(struct node_fetch));
 				section_key->base.type = CRUSTACHE_NODE_FETCH;
 				section_key->base.next = NULL;
-				if (parse_mustache_name(&section_key->var, &mst) < 0)
-					return -1;
+
+				if ((error = parse_mustache_name(&section_key->var, &mst)) < 0)
+					break;
 
 				/* Section node */
 				section = malloc(sizeof(struct node_section));
@@ -459,14 +505,18 @@ parse_internal(
 				/* top of the stack should now be the SECTION node that
 				 * was hosting the subtree */
 				section_open = parr_top(&node_stack);
-				if (!section_open || section_open->base.type != CRUSTACHE_NODE_SECTION)
-					return -1;
+				if (!section_open || section_open->base.type != CRUSTACHE_NODE_SECTION) {
+					error = CRUSTACHE_E_MISMATCHED_SECTION;
+					break;
+				}
 
 				section_open_key = (struct node_fetch *)section_open->section_key;
 
 				if (section_open_key->var.size != mst.size ||
-					memcmp(section_open_key->var.ptr, mst.name, mst.size) != 0)
-					return -1;
+					memcmp(section_open_key->var.ptr, mst.name, mst.size) != 0) {
+					error = CRUSTACHE_E_MISMATCHED_SECTION;
+					break;
+				}
 
 				section_open->raw_content.size = (buffer + mst_pos - section_open->raw_content.ptr);
 				break;
@@ -476,7 +526,7 @@ parse_internal(
 				break;
 
 			case '=': /* set delimiter */
-				result = parse_set_delim(template, &mst);
+				error = parse_set_delim(template, &mst);
 				break;
 
 			case '>': /* partials (not supported) */
@@ -493,15 +543,28 @@ parse_internal(
 				tag_name = malloc(sizeof(struct node_fetch));
 				tag_name->base.type = CRUSTACHE_NODE_FETCH;
 				tag_name->base.next = NULL;
-				if (parse_mustache_name(&tag_name->var, &mst) < 0)
-					return -1;
+				if ((error = parse_mustache_name(&tag_name->var, &mst)) < 0)
+					break;
 
 				/* actual tag */
 				tag = malloc(sizeof(struct node_tag));
 				tag->base.type = CRUSTACHE_NODE_TAG;
 				tag->base.next = NULL;
 				tag->tag_value = (struct node *)tag_name;
-				tag->flags = 0;
+
+				switch (mst.modifier) {
+				case '{':
+					tag->print_mode = CRUSTACHE_TAG_RAW;
+					break;
+
+				case '&':
+					tag->print_mode = CRUSTACHE_TAG_UNESCAPE;
+					break;
+
+				default:
+					tag->print_mode = CRUSTACHE_TAG_ESCAPE;
+					break;
+				}
 
 				/* push into stack */
 				old_root = parr_pop(&node_stack);
@@ -511,14 +574,17 @@ parse_internal(
 			}
 		} /* switch */
 
-		if (result < 0)
-			return result;
+		if (error < 0) {
+			template->error_pos = mst_pos + template->mustache_open.size;
+			break;
+		}
 	}
 
-	return 0;
+	parr_free(&node_stack);
+	return error;
 }
 
-static void free_var(struct crustache_template *template, struct crustache_var *var)
+static void free_var(crustache_template *template, crustache_var *var)
 {
 	if (template->api.var_free != NULL)
 		template->api.var_free(var->type, var->data);
@@ -527,9 +593,10 @@ static void free_var(struct crustache_template *template, struct crustache_var *
 static int
 render_node(
 	struct buf *ob,
-	struct crustache_template *template,
+	crustache_template *template,
 	struct node *node,
-	struct crustache_var *context);
+	crustache_var *context,
+	int depth);
 
 static int
 render_node_static(struct buf *ob, struct node_static *node)
@@ -538,62 +605,79 @@ render_node_static(struct buf *ob, struct node_static *node)
 	return 0;
 }
 
-static int
+static void
 render_node_fetch(
-	struct crustache_var *out,
-	struct crustache_template *template,
+	crustache_var *out,
+	crustache_template *template,
 	struct node_fetch *node,
-	struct crustache_var *context)
+	crustache_var *context)
 {
-	if (node->base.type != CRUSTACHE_NODE_FETCH || context->type != CRUSTACHE_VAR_HASH)
-		return -1;
+	assert(node->base.type == CRUSTACHE_NODE_FETCH &&
+		context->type == CRUSTACHE_VAR_HASH);
 
 	out->type = CRUSTACHE_VAR_FALSE;
 	out->data = NULL;
 	template->api.hash_get(out, context->data, node->var.ptr, node->var.size);
-
-	return 0;
 }
 
 static int
 render_node_tag(
 	struct buf *ob,
-	struct crustache_template *template,
+	crustache_template *template,
 	struct node_tag *node,
-	struct crustache_var *context)
+	crustache_var *context)
 {
-	struct crustache_var tag_value;
+	crustache_var tag_value;
+	int error = 0;
 
-	if (render_node_fetch(&tag_value, template, (struct node_fetch *)node->tag_value, context) < 0)
-		return -1;
+	render_node_fetch(&tag_value, template, (struct node_fetch *)node->tag_value, context);
 
-	if (tag_value.type != CRUSTACHE_VAR_STR) {
-		free_var(template, &tag_value);
-		return -1;
+	switch (tag_value.type) {
+	case CRUSTACHE_VAR_FALSE:
+		break;
+
+	case CRUSTACHE_VAR_STR:
+		switch (node->print_mode) {
+		case CRUSTACHE_TAG_ESCAPE:
+			houdini_escape_html(ob, tag_value.data, tag_value.size);
+			break;
+
+		case CRUSTACHE_TAG_UNESCAPE:
+			houdini_unescape_html(ob, tag_value.data, tag_value.size);
+			break;
+
+		case CRUSTACHE_TAG_RAW:
+			bufput(ob, tag_value.data, tag_value.size);
+			break;
+		}
+		break;
+
+	default:
+		error = CRUSTACHE_E_VARTYPE;
+		break;
 	}
 
-	bufput(ob, tag_value.data, tag_value.size);
 	free_var(template, &tag_value);
-	return 0;
+	return error;
 }
 
 static int
 render_node_section(
 	struct buf *ob,
-	struct crustache_template *template,
+	crustache_template *template,
 	struct node_section *node,
-	struct crustache_var *context)
+	crustache_var *context,
+	int depth)
 {
-	struct crustache_var section_key;
+	crustache_var section_key;
 	int result = 0;
 
-	if (render_node_fetch(&section_key, template, (struct node_fetch *)node->section_key, context) < 0)
-		return -1;
+	render_node_fetch(&section_key, template, (struct node_fetch *)node->section_key, context);
 
 	if (node->inverted) {
 		if (section_key.type == CRUSTACHE_VAR_FALSE ||
 			(section_key.type == CRUSTACHE_VAR_LIST && section_key.size == 0))
-			result = render_node(ob, template, node->content, context); /* TODO: context? */
+			result = render_node(ob, template, node->content, context, depth); /* TODO: context? */
 
 	} else {
 		switch (section_key.type) {
@@ -601,7 +685,7 @@ render_node_section(
 			break;
 
 		case CRUSTACHE_VAR_HASH:
-			result = render_node(ob, template, node->content, &section_key);
+			result = render_node(ob, template, node->content, &section_key, depth);
 			break;
 
 		case CRUSTACHE_VAR_LIST:
@@ -609,9 +693,9 @@ render_node_section(
 			size_t i;
 
 			for (i = 0; result == 0 && i < section_key.size; ++i) {
-				struct crustache_var subcontext = {0, 0, 0};
+				crustache_var subcontext = {0, 0, 0};
 				template->api.list_get(&subcontext, section_key.data, i);
-				result = render_node(ob, template, node->content, &subcontext);
+				result = render_node(ob, template, node->content, &subcontext, depth);
 				free_var(template, &subcontext);
 			}
 			break;
@@ -619,7 +703,7 @@ render_node_section(
 
 		case CRUSTACHE_VAR_LAMBDA:
 		{
-			struct crustache_var lambda_result = {0, 0, 0};
+			crustache_var lambda_result = {0, 0, 0};
 
 			template->api.lambda(
 				&lambda_result,
@@ -650,11 +734,15 @@ render_node_section(
 static int
 render_node(
 	struct buf *ob,
-	struct crustache_template *template,
+	crustache_template *template,
 	struct node *node,
-	struct crustache_var *context)
+	crustache_var *context,
+	int depth)
 {
 	int result = 0;
+
+	if (depth >= MAX_RENDER_RECURSION)
+		return CRUSTACHE_E_TOO_DEEP;
 
 	if (context->type != CRUSTACHE_VAR_HASH)
 		return -1;
@@ -673,7 +761,7 @@ render_node(
 			break;
 
 		case CRUSTACHE_NODE_SECTION:
-			result = render_node_section(ob, template, (struct node_section *)node, context);
+			result = render_node_section(ob, template, (struct node_section *)node, context, depth + 1);
 			break;
 
 		default:
@@ -687,25 +775,30 @@ render_node(
 }
 
 int
-crustache_render(struct buf *ob, struct crustache_template *template, struct crustache_var *context)
+crustache_render(struct buf *ob, crustache_template *template, crustache_var *context)
 {
-	return render_node(ob, template, &template->root, context);
+	return render_node(ob, template, &template->root, context, 0);
 }
 
 int
-crustache_new_template(struct crustache_template **output, const char *raw_template, size_t raw_length)
+crustache_new_template(
+	crustache_template **output,
+	crustache_api *api,
+	const char *raw_template, size_t raw_length)
 {
 	static const char MUSTACHE_OPEN[] = "{{";
 	static const char MUSTACHE_CLOSE[] = "}}";
 
-	struct crustache_template *crt;
+	crustache_template *crt;
+	int error;
 
-	crt = malloc(sizeof(struct crustache_template));
+	crt = malloc(sizeof(crustache_template));
 	if (!crt)
 		return -1;
 
-	memset(crt, 0x0, sizeof(struct crustache_template));
-	*output = crt;
+	memset(crt, 0x0, sizeof(crustache_template));
+
+	memcpy(&crt->api, api, sizeof(crustache_api));
 
 	crt->raw_content.ptr = malloc(raw_length);
 	crt->raw_content.size = raw_length;
@@ -717,37 +810,77 @@ crustache_new_template(struct crustache_template **output, const char *raw_templ
 	crt->mustache_close.chars = MUSTACHE_CLOSE;
 	crt->mustache_close.size = 2;
 
-	crt->depth = 0;
-
 	crt->root.type = CRUSTACHE_NODE_MULTIROOT;
 	crt->root.next = NULL;
 
-	return parse_internal(crt, crt->raw_content.ptr, crt->raw_content.size, &crt->root);
+	*output = crt;
+
+	error = parse_internal(crt, crt->raw_content.ptr, crt->raw_content.size, &crt->root);
+
+#if 1
+	print_tree(&crt->root, 0);
+#endif
+
+	return error;
 }
 
 void
-crustache_free_template(struct crustache_template *template)
+crustache_parser_error(
+	size_t *line_n,
+	size_t *col_n,
+	char *line_buffer,
+	size_t line_buf_size,
+	crustache_template *template)
+{
+	size_t i;
+	size_t last_line;
+
+	if (template->error_pos == 0)
+		return;
+
+	*line_n = 0;
+	last_line = 0;
+
+	for (i = 0; i < template->error_pos; ++i) {
+		if (template->raw_content.ptr[i] == '\n') {
+			last_line = i + 1;
+			(*line_n)++;
+		}
+	}
+
+	*col_n = template->error_pos - last_line;
+
+	while (i < template->raw_content.size && template->raw_content.ptr[i] != '\n')
+		i++;
+
+	memcpy(line_buffer, template->raw_content.ptr + last_line, i - last_line);
+	line_buffer[i - last_line] = 0;
+}
+
+const char *
+crustache_strerror(int error)
+{
+	static const int SMALLEST_ERROR = CRUSTACHE_E_INVALID_DELIM;
+	static const char *ERRORS[] = {
+		NULL,
+		"Mismatched bracers in mustache tag",
+		"Invalid name for mustache tag",
+		"Mistmatched section closing",
+		"Recursion limit reached when rendering the template",
+		"Unexpected variable type for the current context",
+		"Invalid declaration for custom delimiters",
+	};
+
+	if (error >= 0 || error < SMALLEST_ERROR)
+		return NULL;
+
+	return ERRORS[-error];
+}
+
+void
+crustache_free_template(crustache_template *template)
 {
 	node_free(template->root.next);
 	free(template->raw_content.ptr);
 	free(template);
 }
-
-#define TEST
-#ifdef TEST
-int main()
-{
-	const char TEST_TEMPLATE[] = "This is {{just}} a {{&simple}} test with {{#sname}} a {{inside}} section {{/sname}} end";
-
-	struct crustache_template *tmpl;
-
-	if (crustache_new_template(&tmpl, TEST_TEMPLATE, STRLEN(TEST_TEMPLATE)) == 0) {
-		print_tree(&tmpl->root, 0);
-	} else {
-		printf("FAILED TO PARSE TEMPLATE\n");
-	}
-
-	crustache_free_template(tmpl);
-	return 0;
-}
-#endif
