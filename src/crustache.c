@@ -174,6 +174,63 @@ node_free(struct node *node)
 	}
 }
 
+
+#if CRUSTACHE_CUSTOM_ALLOCATION
+#define POOL_NODE_SIZE 128
+
+static void
+pool_grow(crustache_template *template)
+{
+	void *pool;
+	size_t *pool_size; 
+
+	pool = malloc(POOL_NODE_SIZE);
+	pool_size = (size_t *)pool;
+
+	*pool_size = sizeof(size_t);
+	parr_push(&template->pool, pool);
+}
+
+static void *
+pool_alloc(crustache_template *template, node_t type, size_t size)
+{
+	void *pool;
+	size_t *pool_size; 
+	struct node *alloc;
+
+try_allocate:
+	pool = parr_top(&template->pool);
+	pool_size = (size_t *)pool;
+
+	if (*pool_size + size > POOL_NODE_SIZE) {
+		pool_grow(template);
+		goto try_allocate;
+	}
+
+	alloc = pool + (*pool_size);
+	alloc->type = type;
+	alloc->next = NULL;
+
+	*pool_size = *pool_size + size;
+	return alloc;
+}
+#else
+
+static void *
+_node_alloc(node_t type, size_t size)
+{
+	struct node *node = malloc(size);
+	if (!node)
+		return NULL;
+
+	node->type = type;
+	node->next = NULL;
+	return node;
+}
+
+#define node_alloc(type, cls) _node_alloc(type, sizeof(cls))
+#endif
+
 static const char *
 railgun(
 	const char *target, size_t target_len,
@@ -468,22 +525,16 @@ parse_internal(
 				struct node *old_root, *child_root;
 
 				/* Child root */
-				child_root = malloc(sizeof(struct node));
-				child_root->type = CRUSTACHE_NODE_MULTIROOT;
-				child_root->next = NULL;
+				child_root = node_alloc(CRUSTACHE_NODE_MULTIROOT, struct node);
 
 				/* Section key */
-				section_key = malloc(sizeof(struct node_fetch));
-				section_key->base.type = CRUSTACHE_NODE_FETCH;
-				section_key->base.next = NULL;
+				section_key = node_alloc(CRUSTACHE_NODE_FETCH, struct node_fetch);
 
 				if ((error = parse_mustache_name(&section_key->var, &mst)) < 0)
 					break;
 
 				/* Section node */
-				section = malloc(sizeof(struct node_section));
-				section->base.type = CRUSTACHE_NODE_SECTION;
-				section->base.next = NULL;
+				section = node_alloc(CRUSTACHE_NODE_SECTION, struct node_section);
 				section->section_key = (struct node *)section_key;
 				section->content = child_root;
 				section->raw_content.ptr = buffer + i;
@@ -544,16 +595,12 @@ parse_internal(
 				struct node *old_root;
 
 				/* Section name */
-				tag_name = malloc(sizeof(struct node_fetch));
-				tag_name->base.type = CRUSTACHE_NODE_FETCH;
-				tag_name->base.next = NULL;
+				tag_name = node_alloc(CRUSTACHE_NODE_FETCH, struct node_fetch);
 				if ((error = parse_mustache_name(&tag_name->var, &mst)) < 0)
 					break;
 
 				/* actual tag */
-				tag = malloc(sizeof(struct node_tag));
-				tag->base.type = CRUSTACHE_NODE_TAG;
-				tag->base.next = NULL;
+				tag = node_alloc(CRUSTACHE_NODE_TAG, struct node_tag);
 				tag->tag_value = (struct node *)tag_name;
 
 				switch (mst.modifier) {
