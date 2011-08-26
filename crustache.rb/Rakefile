@@ -1,0 +1,20 @@
+require 'rake'
+require 'rake/clean'
+require 'rake/extensiontask'
+
+Rake::ExtensionTask.new('crustache')
+
+task :default => [:gather, :compile]
+
+desc 'Gather required sources into extension directory'
+task :gather do |t|
+  files =
+    FileList[
+      '../src/{buffer,array,houdini,crustache}.h',
+      '../src/{buffer,array,houdini,crustache}.c',
+    ]
+  cp files, 'ext/crustache/',
+    :preserve => true,
+    :verbose => true
+end
+
