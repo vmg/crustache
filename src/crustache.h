@@ -12,6 +12,7 @@ typedef enum {
 	CRUSTACHE_E_TOO_DEEP = -4,
 	CRUSTACHE_E_VARTYPE = -5,
 	CRUSTACHE_E_INVALID_DELIM = -6,
+	CRUSTACHE_E_NOT_IMPLEMENTED = -7,
 } crustache_error_t;
 
 typedef enum {

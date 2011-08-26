@@ -308,14 +308,17 @@ parse_mustache(struct mustache *mst, const char *buffer, size_t size)
 				size--;
 		}
 
+		if (size == 0)
+			return CRUSTACHE_E_BAD_MUSTACHE_NAME;
+
 		if (mst->modifier == '{') {
-			if (!size || buffer[size - 1] != '}')
+			if (buffer[size - 1] != '}')
 				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
 			size--;
 		}
 
 		if (mst->modifier == '=') {
-			if (!size || buffer[size - 1] != '=')
+			if (buffer[size - 1] != '=')
 				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
 			size--;
 		}
@@ -358,7 +361,7 @@ parse_set_delim(crustache_template *template, struct mustache *mst)
 	template->mustache_open.size = open_size;
 
 	size--;
-	while (size > 0 && !isspace(buffer[size])) {
+	while (size > 0 && !tag_isspace(buffer[size])) {
 		if (buffer[size] == '=' || buffer[size] == '\n')
 			return CRUSTACHE_E_INVALID_DELIM;
 
@@ -530,7 +533,8 @@ parse_internal(
 				break;
 
 			case '>': /* partials (not supported) */
-				return -2;
+				error = CRUSTACHE_E_NOT_IMPLEMENTED;
+				break;
 
 			case '{': /* raw html */
 			case '&': /* unescape HTML */
@@ -817,7 +821,7 @@ crustache_new_template(
 
 	error = parse_internal(crt, crt->raw_content.ptr, crt->raw_content.size, &crt->root);
 
-#if 1
+#if 0
 	print_tree(&crt->root, 0);
 #endif
 
@@ -860,7 +864,7 @@ crustache_parser_error(
 const char *
 crustache_strerror(int error)
 {
-	static const int SMALLEST_ERROR = CRUSTACHE_E_INVALID_DELIM;
+	static const int SMALLEST_ERROR = CRUSTACHE_E_NOT_IMPLEMENTED;
 	static const char *ERRORS[] = {
 		NULL,
 		"Mismatched bracers in mustache tag",
@@ -869,6 +873,7 @@ crustache_strerror(int error)
 		"Recursion limit reached when rendering the template",
 		"Unexpected variable type for the current context",
 		"Invalid declaration for custom delimiters",
+		"Partials are currently not supported",
 	};
 
 	if (error >= 0 || error < SMALLEST_ERROR)
