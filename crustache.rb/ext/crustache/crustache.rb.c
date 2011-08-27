@@ -47,7 +47,7 @@ rb_crustache__setvar(crustache_var *variable, VALUE rb_obj)
 		break;
 
 	case T_HASH:
-		variable->type = CRUSTACHE_VAR_HASH;
+		variable->type = CRUSTACHE_VAR_CONTEXT;
 		variable->data = (void *)rb_obj;
 		break;
 
@@ -69,34 +69,43 @@ rb_crustache__setvar(crustache_var *variable, VALUE rb_obj)
 			break;
 		}
 
-		variable->type = CRUSTACHE_VAR_HASH;
+		variable->type = CRUSTACHE_VAR_CONTEXT;
 		variable->data = (void *)rb_obj;
 	}
 }
 
-static void
-rb_crustache__hash_get(
+static int
+rb_crustache__context_get(
 	crustache_var *var,
-	void *hash,
+	void *ctx,
 	const char *key,
 	size_t key_size)
 {
-	VALUE rb_hash = (VALUE)hash;
+	VALUE rb_ctx = (VALUE)ctx;
 	VALUE rb_key, rb_val;
 
 	rb_key = rb_str_new(key, (long)key_size);
+	rb_val = Qnil;
 
-	if (TYPE(rb_hash) == T_HASH) {
-		rb_val = rb_hash_aref(rb_hash, rb_key);
+	if (TYPE(rb_ctx) == T_HASH) {
+		rb_val = rb_hash_lookup(rb_ctx, rb_key);
+		if (NIL_P(rb_val))
+			rb_val = rb_hash_lookup(rb_ctx, rb_str_intern(rb_key));
 	} else {
 		ID method = rb_to_id(rb_key);
-		rb_val = Qnil;
 
-		if (rb_respond_to(rb_hash, method))
-			rb_val = rb_funcall(rb_hash, method, 0);
+		if (rb_respond_to(rb_ctx, method))
+			rb_val = rb_funcall(rb_ctx, method, 0);
+
+		else if (rb_respond_to(rb_ctx, rb_intern("[]")))
+			rb_val = rb_funcall(rb_ctx, rb_intern("[]"), 1, key);
 	}
 
+	if (NIL_P(rb_val)) /* not found */
+		return -1;
+
 	rb_crustache__setvar(var, rb_val);
+	return 0;
 }
 
 static void
@@ -136,24 +145,32 @@ rb_template__free(void *template)
 static void
 rb_template__parser_error(crustache_template *template, int error)
 {
-	char error_line[256];
-	size_t line_n, col_n;
+	const char *error_line;
+	size_t line_len, line_n, col_n;
 
-	crustache_parser_error(&line_n, &col_n, error_line, sizeof(error_line), template);
+	error_line = crustache_error_syntaxline(&line_n, &col_n, &line_len, template);
 	crustache_free_template(template);
 
 	rb_raise(rb_eParse,
-		"%s (line %d, col %d)\n\t%s\n\t%*s\n",
+		"%s (line %d, col %d)\n\t%.*s\n\t%*s\n",
 		crustache_strerror(error), (int)line_n, (int)col_n,
-		error_line,
-		(int)col_n + 1, "^");
+		(int)line_len, error_line,
+		(int)col_n, "^");
+}
+
+static void
+rb_template__render_error(crustache_template *template, int error)
+{
+	char error_node[256];
+	crustache_error_rendernode(error_node, sizeof(error_node), template);
+	rb_raise(rb_eRender, "%s (%s)", crustache_strerror(error), error_node);
 }
 
 static VALUE
 rb_template_new(VALUE klass, VALUE rb_raw_template)
 {
 	static crustache_api DEFAULT_API = {
-		rb_crustache__hash_get,
+		rb_crustache__context_get,
 		rb_crustache__list_get,
 		rb_crustache__lambda,
 		NULL
@@ -189,7 +206,7 @@ rb_template_render(VALUE self, VALUE rb_context)
 
 	error = crustache_render(output_buf, template, &ctx);
 	if (error < 0)
-		rb_raise(rb_eRender, "Failed to render template");
+		rb_template__render_error(template, error);
 
 	result = rb_str_new(output_buf->data, output_buf->size);
 	bufrelease(output_buf);

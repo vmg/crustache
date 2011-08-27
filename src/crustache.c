@@ -77,7 +77,11 @@ struct crustache_template {
 
 	size_t error_pos;
 
+	struct parray context;
+	int fail_on_not_found;
+
 	struct node root;
+	struct node *error_node;
 };
 
 static void
@@ -321,7 +325,7 @@ find_mustache(
 
 	if (mst_end == NULL || mst_end < mst_start) {
 		template->error_pos = mst_end ? (mst_end - buffer) : (mst_start - buffer);
-		return CRUSTACHE_E_MISMATCHED_MUSTACHE;
+		return CR_EPARSE_MISMATCHED_MUSTACHE;
 	}
 
 	/* Greedy matching */
@@ -366,17 +370,17 @@ parse_mustache(struct mustache *mst, const char *buffer, size_t size)
 		}
 
 		if (size == 0)
-			return CRUSTACHE_E_BAD_MUSTACHE_NAME;
+			return CR_EPARSE_BAD_MUSTACHE_NAME;
 
 		if (mst->modifier == '{') {
 			if (buffer[size - 1] != '}')
-				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
+				return CR_EPARSE_MISMATCHED_MUSTACHE;
 			size--;
 		}
 
 		if (mst->modifier == '=') {
 			if (buffer[size - 1] != '=')
-				return CRUSTACHE_E_MISMATCHED_MUSTACHE;
+				return CR_EPARSE_MISMATCHED_MUSTACHE;
 			size--;
 		}
 	}
@@ -389,7 +393,7 @@ parse_mustache(struct mustache *mst, const char *buffer, size_t size)
 		size--;
 
 	if (size == 0)
-		return CRUSTACHE_E_BAD_MUSTACHE_NAME;
+		return CR_EPARSE_BAD_MUSTACHE_NAME;
 
 	mst->name = buffer;
 	mst->size = size;
@@ -406,13 +410,13 @@ parse_set_delim(crustache_template *template, struct mustache *mst)
 
 	while (open_size < size && !tag_isspace(buffer[open_size])) {
 		if (buffer[open_size] == '=' || buffer[open_size] == '\n')
-			return CRUSTACHE_E_INVALID_DELIM;
+			return CR_EPARSE_BAD_DELIM;
 
 		open_size++;
 	}
 
 	if (open_size == 0 || open_size == size)
-		return CRUSTACHE_E_INVALID_DELIM;
+		return CR_EPARSE_BAD_DELIM;
 
 	template->mustache_open.chars = buffer;
 	template->mustache_open.size = open_size;
@@ -420,7 +424,7 @@ parse_set_delim(crustache_template *template, struct mustache *mst)
 	size--;
 	while (size > 0 && !tag_isspace(buffer[size])) {
 		if (buffer[size] == '=' || buffer[size] == '\n')
-			return CRUSTACHE_E_INVALID_DELIM;
+			return CR_EPARSE_BAD_DELIM;
 
 		size--;
 	}
@@ -428,14 +432,14 @@ parse_set_delim(crustache_template *template, struct mustache *mst)
 	size++;
 
 	if (size <= open_size)
-		return CRUSTACHE_E_INVALID_DELIM;
+		return CR_EPARSE_BAD_DELIM;
 
 	template->mustache_close.chars = buffer + size;
 	template->mustache_close.size = mst->size - size;
 
 	for (i = open_size; i < size; ++i)
 		if (!tag_isspace(buffer[i]))
-			return CRUSTACHE_E_INVALID_DELIM;
+			return CR_EPARSE_BAD_DELIM;
 
 #if 0
 	printf("Delim |%.*s| |%.*s|\n",
@@ -455,7 +459,7 @@ parse_mustache_name(struct node_str *str, struct mustache *mst)
 
 	for (i = 0; i < mst->size; ++i) {
 		if (!isalnum(mst->name[i]) && mst->name[i] != '_')
-			return CRUSTACHE_E_BAD_MUSTACHE_NAME;
+			return CR_EPARSE_BAD_MUSTACHE_NAME;
 	}
 
 	str->ptr = mst->name;
@@ -496,6 +500,11 @@ parse_internal(
 
 			stnode->str.ptr = buffer + i;
 			stnode->str.size = mst_pos - i;
+
+			if (stnode->str.ptr[0] == '\n') {
+				stnode->str.ptr++;
+				stnode->str.size--;
+			}
 
 			old_root = parr_pop(&node_stack);
 			old_root->next = (struct node *)stnode;
@@ -560,7 +569,7 @@ parse_internal(
 				 * was hosting the subtree */
 				section_open = parr_top(&node_stack);
 				if (!section_open || section_open->base.type != CRUSTACHE_NODE_SECTION) {
-					error = CRUSTACHE_E_MISMATCHED_SECTION;
+					error = CR_EPARSE_MISMATCHED_SECTION;
 					break;
 				}
 
@@ -568,7 +577,7 @@ parse_internal(
 
 				if (section_open_key->var.size != mst.size ||
 					memcmp(section_open_key->var.ptr, mst.name, mst.size) != 0) {
-					error = CRUSTACHE_E_MISMATCHED_SECTION;
+					error = CR_EPARSE_MISMATCHED_SECTION;
 					break;
 				}
 
@@ -584,7 +593,7 @@ parse_internal(
 				break;
 
 			case '>': /* partials (not supported) */
-				error = CRUSTACHE_E_NOT_IMPLEMENTED;
+				error = CR_EPARSE_NOT_IMPLEMENTED;
 				break;
 
 			case '{': /* raw html */
@@ -646,42 +655,60 @@ render_node(
 	struct buf *ob,
 	crustache_template *template,
 	struct node *node,
-	crustache_var *context,
 	int depth);
 
-static int
+static void
 render_node_static(struct buf *ob, struct node_static *node)
 {
+	assert(node->base.type == CRUSTACHE_NODE_STATIC);
 	bufput(ob, node->str.ptr, node->str.size);
-	return 0;
 }
 
-static void
+static int
 render_node_fetch(
 	crustache_var *out,
 	crustache_template *template,
-	struct node_fetch *node,
-	crustache_var *context)
+	struct node_fetch *node)
 {
-	assert(node->base.type == CRUSTACHE_NODE_FETCH &&
-		context->type == CRUSTACHE_VAR_HASH);
+	int i;
 
-	out->type = CRUSTACHE_VAR_FALSE;
-	out->data = NULL;
-	template->api.hash_get(out, context->data, node->var.ptr, node->var.size);
+	assert(node->base.type == CRUSTACHE_NODE_FETCH && template->context.size);
+
+	for (i = (int)template->context.size - 1; i >= 0; --i) {
+		crustache_var *context = template->context.item[i];
+
+		assert(context->type == CRUSTACHE_VAR_CONTEXT);
+		if (template->api.context_find(out, context->data, node->var.ptr, node->var.size) == 0)
+			break;
+	}
+
+	if (i < 0) { /* not found */
+		if (template->fail_on_not_found) {
+			template->error_node = (struct node *)node;
+			return CR_ERENDER_NOT_FOUND;
+		}
+
+		out->type = CRUSTACHE_VAR_FALSE;
+		out->data = NULL;
+	}
+
+	return 0;
 }
 
 static int
 render_node_tag(
 	struct buf *ob,
 	crustache_template *template,
-	struct node_tag *node,
-	crustache_var *context)
+	struct node_tag *node)
 {
 	crustache_var tag_value;
 	int error = 0;
 
-	render_node_fetch(&tag_value, template, (struct node_fetch *)node->tag_value, context);
+	assert(node->base.type == CRUSTACHE_NODE_TAG);
+
+	error = render_node_fetch(&tag_value, template, (struct node_fetch *)node->tag_value);
+	if (error < 0)
+		return error;
 
 	switch (tag_value.type) {
 	case CRUSTACHE_VAR_FALSE:
@@ -704,7 +731,8 @@ render_node_tag(
 		break;
 
 	default:
-		error = CRUSTACHE_E_VARTYPE;
+		error = CR_ERENDER_WRONG_VARTYPE;
+		template->error_node = (struct node *)node->tag_value;
 		break;
 	}
 
@@ -717,26 +745,31 @@ render_node_section(
 	struct buf *ob,
 	crustache_template *template,
 	struct node_section *node,
-	crustache_var *context,
 	int depth)
 {
-	crustache_var section_key;
+	crustache_var section_key = {0, 0, 0};
 	int result = 0;
 
-	render_node_fetch(&section_key, template, (struct node_fetch *)node->section_key, context);
+	assert(node->base.type == CRUSTACHE_NODE_SECTION);
+
+	result = render_node_fetch(&section_key, template, (struct node_fetch *)node->section_key);
+	if (result < 0)
+		return result;
 
 	if (node->inverted) {
 		if (section_key.type == CRUSTACHE_VAR_FALSE ||
 			(section_key.type == CRUSTACHE_VAR_LIST && section_key.size == 0))
-			result = render_node(ob, template, node->content, context, depth); /* TODO: context? */
+			result = render_node(ob, template, node->content, depth);
 
 	} else {
 		switch (section_key.type) {
 		case CRUSTACHE_VAR_FALSE:
 			break;
 
-		case CRUSTACHE_VAR_HASH:
-			result = render_node(ob, template, node->content, &section_key, depth);
+		case CRUSTACHE_VAR_CONTEXT:
+			parr_push(&template->context, &section_key);
+			result = render_node(ob, template, node->content, depth);
+			parr_pop(&template->context);
 			break;
 
 		case CRUSTACHE_VAR_LIST:
@@ -746,8 +779,10 @@ render_node_section(
 			for (i = 0; result == 0 && i < section_key.size; ++i) {
 				crustache_var subcontext = {0, 0, 0};
 				template->api.list_get(&subcontext, section_key.data, i);
-				result = render_node(ob, template, node->content, &subcontext, depth);
-				free_var(template, &subcontext);
+
+				parr_push(&template->context, &subcontext);
+				result = render_node(ob, template, node->content, depth);
+				free_var(template, parr_pop(&template->context));
 			}
 			break;
 		}
@@ -765,7 +800,8 @@ render_node_section(
 			if (lambda_result.type == CRUSTACHE_VAR_STR) {
 				bufput(ob, lambda_result.data, lambda_result.size);
 			} else {
-				result = -1;
+				result = CR_ERENDER_WRONG_VARTYPE;
+				template->error_node = (struct node *)node;
 			}
 
 			free_var(template, &lambda_result);
@@ -773,7 +809,8 @@ render_node_section(
 		}
 
 		default:
-			result = -1;
+			result = CR_ERENDER_WRONG_VARTYPE;
+			template->error_node = (struct node *)node->section_key;
 			break;
 		}
 	}
@@ -787,16 +824,21 @@ render_node(
 	struct buf *ob,
 	crustache_template *template,
 	struct node *node,
-	crustache_var *context,
 	int depth)
 {
 	int result = 0;
+	crustache_var *ctx;
 
-	if (depth >= MAX_RENDER_RECURSION)
-		return CRUSTACHE_E_TOO_DEEP;
+	if (depth >= MAX_RENDER_RECURSION) {
+		template->error_node = node;
+		return CR_ERENDER_TOO_DEEP;
+	}
 
-	if (context->type != CRUSTACHE_VAR_HASH)
-		return -1;
+	ctx = parr_top(&template->context);
+	if (ctx == NULL || ctx->type != CRUSTACHE_VAR_CONTEXT) {
+		template->error_node = node;
+		return CR_ERENDER_INVALID_CONTEXT;
+	}
 
 	while (result == 0 && node != NULL) {
 		switch (node->type) {
@@ -804,15 +846,15 @@ render_node(
 			break;
 
 		case CRUSTACHE_NODE_STATIC:
-			result = render_node_static(ob, (struct node_static *)node);
+			render_node_static(ob, (struct node_static *)node);
 			break;
 
 		case CRUSTACHE_NODE_TAG:
-			result = render_node_tag(ob, template, (struct node_tag *)node, context);
+			result = render_node_tag(ob, template, (struct node_tag *)node);
 			break;
 
 		case CRUSTACHE_NODE_SECTION:
-			result = render_node_section(ob, template, (struct node_section *)node, context, depth + 1);
+			result = render_node_section(ob, template, (struct node_section *)node, depth + 1);
 			break;
 
 		default:
@@ -828,7 +870,15 @@ render_node(
 int
 crustache_render(struct buf *ob, crustache_template *template, crustache_var *context)
 {
-	return render_node(ob, template, &template->root, context, 0);
+	int error;
+
+	parr_push(&template->context, context);
+	error = render_node(ob, template, &template->root, 0);
+
+	assert(template->context.size == 1);
+	parr_free(&template->context);
+
+	return error;
 }
 
 int
@@ -875,21 +925,20 @@ crustache_new_template(
 	return error;
 }
 
-void
-crustache_parser_error(
+const char *
+crustache_error_syntaxline(
 	size_t *line_n,
 	size_t *col_n,
-	char *line_buffer,
-	size_t line_buf_size,
+	size_t *line_len,
 	crustache_template *template)
 {
 	size_t i;
 	size_t last_line;
 
 	if (template->error_pos == 0)
-		return;
+		return NULL;
 
-	*line_n = 0;
+	*line_n = 1;
 	last_line = 0;
 
 	for (i = 0; i < template->error_pos; ++i) {
@@ -899,28 +948,81 @@ crustache_parser_error(
 		}
 	}
 
-	*col_n = template->error_pos - last_line;
+	*col_n = template->error_pos - last_line + 1;
 
-	while (i < template->raw_content.size && template->raw_content.ptr[i] != '\n')
+	while (i < template->raw_content.size &&
+		template->raw_content.ptr[i] != '\n')
 		i++;
 
-	memcpy(line_buffer, template->raw_content.ptr + last_line, i - last_line);
-	line_buffer[i - last_line] = 0;
+	*line_len = i - last_line;
+	return template->raw_content.ptr + last_line;
+}
+
+void
+crustache_error_rendernode(char *buffer, size_t size, crustache_template *template)
+{
+
+	if (template->error_node == NULL) {
+		snprintf(buffer, (int)size, "<NULL Node @ %p>", NULL);
+		return;
+	}
+
+	switch (template->error_node->type) {
+		case CRUSTACHE_NODE_SECTION:
+		{
+			struct node_section *node =
+				(struct node_section *)template->error_node;
+
+			int print_len = (int)node->raw_content.size;
+
+			if (print_len > 32)
+				print_len = 32;
+
+			snprintf(buffer, (int)size,
+				"\"%.*s [...]\", <Section @ %p>",
+				print_len, node->raw_content.ptr, node);
+
+			break;
+		}
+
+		case CRUSTACHE_NODE_FETCH:
+		{
+			struct node_fetch *node = 
+				(struct node_fetch *)template->error_node;
+
+			snprintf(buffer, (int)size,
+				"{{%.*s}}, <Variable @ %p>",
+				(int)node->var.size, node->var.ptr, node);
+
+			break;
+		}
+
+		case CRUSTACHE_NODE_STATIC:
+		case CRUSTACHE_NODE_MULTIROOT:
+		default:
+			snprintf(buffer, (int)size, "<Node @ %p>", template->error_node);
+			break;
+	}
+
+	return;
 }
 
 const char *
 crustache_strerror(int error)
 {
-	static const int SMALLEST_ERROR = CRUSTACHE_E_NOT_IMPLEMENTED;
+	static const int SMALLEST_ERROR = CR_ERENDER_NOT_FOUND;
 	static const char *ERRORS[] = {
 		NULL,
 		"Mismatched bracers in mustache tag",
 		"Invalid name for mustache tag",
 		"Mistmatched section closing",
-		"Recursion limit reached when rendering the template",
-		"Unexpected variable type for the current context",
 		"Invalid declaration for custom delimiters",
 		"Partials are currently not supported",
+
+		"Recursion limit reached when rendering the template",
+		"Wrong variable type fetched from context",
+		"The given object is not a valid Mustache context",
+		"A template variable could not be found on the active context",
 	};
 
 	if (error >= 0 || error < SMALLEST_ERROR)
