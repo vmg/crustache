@@ -23,6 +23,11 @@ Yes, even partials. Ain't that awesome?
 - Partials
 - Set tag delimiters
 
+## About
+
+Crustache has been written by Vicent Martí ([@tanoku](http://twitter.com/tanoku)).
+You'll find that following him on Twitter is a Zen-like, enlightening experience.
+
 ## Try out Crustache.rb!
 
 You probably don't have the time to write a Crustache wrapper for a high
