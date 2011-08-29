@@ -17,6 +17,7 @@ typedef enum {
 	CR_ERENDER_WRONG_VARTYPE = -7,
 	CR_ERENDER_INVALID_CONTEXT = -8,
 	CR_ERENDER_NOT_FOUND = -9,
+	CR_ERENDER_BAD_PARTIAL = -10,
 } crustache_error_t;
 
 typedef enum {
@@ -33,20 +34,24 @@ typedef struct {
 	size_t size;
 } crustache_var;
 
-typedef struct {
-	int (*context_find)(crustache_var *, void *context, const char *key, size_t key_size);
-	void (*list_get)(crustache_var *, void *list, size_t i);
-	void (*lambda)(crustache_var *, void *lambda, const char *raw_template, size_t raw_size);
-	void (*var_free)(crustache_var_t type, void *var);
-} crustache_api;
-
 typedef struct crustache_template crustache_template;
 
+typedef struct {
+	int (*context_find)(crustache_var *, void *context, const char *key, size_t key_size);
+	int (*list_get)(crustache_var *, void *list, size_t i);
+	int (*lambda)(crustache_var *, void *lambda, const char *raw_template, size_t raw_size);
+	void (*var_free)(crustache_var_t type, void *var);
+
+	int (*partial)(crustache_template **partial, const char *partial_name, size_t name_size);
+	int free_partials;
+} crustache_api;
+
+
 extern void
-crustache_free_template(crustache_template *template);
+crustache_free(crustache_template *template);
 
 extern int
-crustache_new_template(crustache_template **output, crustache_api *api, const char *raw_template, size_t raw_length);
+crustache_new(crustache_template **output, crustache_api *api, const char *raw_template, size_t raw_length);
 
 extern int
 crustache_render(struct buf *ob, crustache_template *template, crustache_var *context);

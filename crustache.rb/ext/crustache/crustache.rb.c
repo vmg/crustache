@@ -35,7 +35,7 @@ static VALUE rb_cTemplate;
 static VALUE rb_eParse;
 static VALUE rb_eRender;
 
-static void
+static int
 rb_crustache__setvar(crustache_var *variable, VALUE rb_obj)
 {
 
@@ -72,6 +72,18 @@ rb_crustache__setvar(crustache_var *variable, VALUE rb_obj)
 		variable->type = CRUSTACHE_VAR_CONTEXT;
 		variable->data = (void *)rb_obj;
 	}
+
+	return 0;
+}
+
+static int
+rb_crustache__partial(
+	crustache_template **partial,
+	const char *partial_name,
+	size_t name_len)
+{
+	rb_raise(rb_eRender, "Partials not currently supported");
+	return -1;
 }
 
 static int
@@ -104,11 +116,10 @@ rb_crustache__context_get(
 	if (NIL_P(rb_val)) /* not found */
 		return -1;
 
-	rb_crustache__setvar(var, rb_val);
-	return 0;
+	return rb_crustache__setvar(var, rb_val);
 }
 
-static void
+static int
 rb_crustache__list_get(
 	crustache_var *var,
 	void *list,
@@ -116,10 +127,10 @@ rb_crustache__list_get(
 {
 	VALUE rb_array = (VALUE)list;
 	Check_Type(rb_array, T_ARRAY);
-	rb_crustache__setvar(var, rb_ary_entry(rb_array, (long)i));
+	return rb_crustache__setvar(var, rb_ary_entry(rb_array, (long)i));
 }
 
-static void
+static int
 rb_crustache__lambda(
 	crustache_var *var,
 	void *lambda,
@@ -133,13 +144,13 @@ rb_crustache__lambda(
 	rb_val = rb_funcall(rb_lambda, rb_intern("call"), 1, rb_tmpl);
 	Check_Type(rb_val, T_STRING);
 
-	rb_crustache__setvar(var, rb_val);
+	return rb_crustache__setvar(var, rb_val);
 }
 
 static void
 rb_template__free(void *template)
 {
-	crustache_free_template((crustache_template *)template);
+	crustache_free((crustache_template *)template);
 }
 
 static void
@@ -169,18 +180,20 @@ rb_template__render_error(crustache_template *template, int error)
 static VALUE
 rb_template_new(VALUE klass, VALUE rb_raw_template)
 {
-	static crustache_api DEFAULT_API = {
-		rb_crustache__context_get,
-		rb_crustache__list_get,
-		rb_crustache__lambda,
-		NULL
-	};
-
 	crustache_template *template;
 	int error;
 
-	error = crustache_new_template(&template,
-		&DEFAULT_API,
+	crustache_api default_api = {
+		rb_crustache__context_get,
+		rb_crustache__list_get,
+		rb_crustache__lambda,
+		NULL,
+		rb_crustache__partial,
+		0
+	};
+
+	error = crustache_new(&template,
+		&default_api,
 		RSTRING_PTR(rb_raw_template),
 		RSTRING_LEN(rb_raw_template));
 
