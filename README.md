@@ -4,7 +4,7 @@ Crustache, an embeddable templating engine
 > Hubot mustache me C
 
 CRUSTACHE! Shout it loud when you read it. With anger.
-It is an (experimental) implementation of the [{{Mustache}}][http://mustache.github.com/]
+It is an (experimental) implementation of the [{{Mustache}}](http://mustache.github.com/)
 templating engine, in C, with the goal of improving the speed of
 other Mustache implementations in higher level languages.
 
