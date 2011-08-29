@@ -1,15 +1,27 @@
 Crustache, an embeddable templating engine
 ==========================================
 
-Crustacheeeeeeeeeee. Shout it loud when you read it. With anger.
-It is an (experimental) implementation of the [{{Mustache}}][mustache]
-templating system, in C, with the goal of improving the speed of
+> Hubot mustache me C
+
+CRUSTACHE! Shout it loud when you read it. With anger.
+It is an (experimental) implementation of the [{{Mustache}}][http://mustache.github.com/]
+templating engine, in C, with the goal of improving the speed of
 other Mustache implementations in higher level languages.
 
 You should totally try it out. It may blow up your computer. Or it may
-increase the rendering speed of your native Crustache implementation in
-a dynamic language by up to 40 times.
-WHO KNOWS WHATS GONNA HAPPEN. DO IT FOR SCIENCE.
+increase the rendering speed of your native Crustache implementation
+by up to 40 times. WHO KNOWS WHATS GONNA HAPPEN. DO IT FOR SCIENCE.
+
+## Features
+
+Currently Crustache supports all the features available in the original Mustache.
+Yes, even partials. Ain't that awesome?
+
+- Variables
+- Sections (including lambdas, lists, inverted sections)
+- Comments
+- Partials
+- Set tag delimiters
 
 ## Try out Crustache.rb!
 
@@ -192,3 +204,49 @@ typedef struct {
 ### Using Crustache
 
     Once the interaction API has been defined, using crustache is *sooo* easy:
+
+- `int crustache_new(crustache_template **output, crustache_api *api, const char *raw_template, size_t raw_length)`:
+
+    Create a new Crustache template. The `api` paremeter is a pointer to your defined API for
+    context interaction. `raw_template` points to the raw text of the template. A copy of this text
+    will be stored internally by the template.
+
+    The raw template text will be parsed and compiled internally, ready for rendering. The new template
+    will be stored in the `output` pointer.
+
+    If the compilation or parsing fails, a negative value (error code) will be returned,
+    but the template object will be created anyway. The template object can then be queried for
+    the syntax error(s) in the raw text.
+
+- `void crustache_free(crustache_template *template)`:
+
+    Free an existing Crustache template, once it's no longer needed. Crustache templates must be
+    free'd even if their compilation with `crustache_new` failed.
+
+- `int crustache_render(struct buf *ob, crustache_template *template, crustache_var *context)`:
+
+    Render a compiled template, and write the rendered output to the `ob` buffer.
+
+    `template` is a pointer to a previously compiled template. `context` is an opaque pointer to
+    the initial context for the template, which will be accessed through the Crustache API.
+
+    The method will return 0 on success, or a negative value (error code) if the rendering failed
+    for whatever reason.
+
+- `const char * crustache_error_syntaxline(
+	size_t *line_n, size_t *col_n, size_t *line_len, crustache_template *template)`:
+
+    Query the detailed information about the last compilation error in the template. The returned
+    value is the exact position in the raw text of the template where the compilation failed. This
+    information will only be available if `crustache_new` returned an error code.
+
+- `void crustache_error_rendernode(char *buffer, size_t size, crustache_template *template)`:
+
+    Query the detailed information about the last rendering error in the template. The returned
+    value is a textual representation of the Mustache node in the compiled template that could not
+    be rendered with the given context. This information will only be available if `crustache_render`
+    returned an error code.
+
+- `const char * crustache_strerror(int error)`
+
+    Get a representative error message from a given error code.
