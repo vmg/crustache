@@ -63,7 +63,7 @@ houdini_unescape_html(struct buf *ob, const char *src, size_t size)
 			break;
 
 		#define REPLACE(pat,rep)\
-			if (i + sizeof(pat) <= size && !memcmp(src + i + 1, pat, sizeof(pat) - 1)) { bufputc(ob, rep); i += sizeof(pat) - 1; }
+			if (i + sizeof(pat) <= size && !memcmp(src + i + 1, pat, sizeof(pat) - 1)) { bufputc(ob, rep); i += sizeof(pat); }
 
 		REPLACE("lt;", '<')
 		else REPLACE("gt;", '>')
