@@ -62,27 +62,20 @@ houdini_unescape_html(struct buf *ob, const char *src, size_t size)
 		if (i >= size)
 			break;
 
-		if (src[i + 1] == 'l' && src[i + 2] == 't' && src[i + 3] == ';') {
-			bufputc(ob, '<');
-			i += 4;
-		} else if (src[i + 1] == 'g' && src[i + 2] == 't' && src[i + 3] == ';') {
-			bufputc(ob, '>');
-			i += 4;
-		} else if (src[i + 1] == 'a' && src[i + 2] == 'm' && src[i + 3] == 'p' && src[i + 4] == ';') {
-			bufputc(ob, '&');
-			i += 5;
-		} else if (src[i + 1] == '#' && src[i + 2] == '3' && src[i + 3] == '9' && src[i + 4] == ';') {
-			bufputc(ob, '\'');
-			i += 5;
-		} else if (src[i + 1] == '#' && src[i + 2] == '4' && src[i + 3] == '7' && src[i + 4] == ';') {
-			bufputc(ob, '/');
-			i += 5;
-		} else if (src[i + 1] == 'q' && src[i + 2] == 'u' && src[i + 3] == 'o' && src[i + 4] == 't' && src[i + 5] == ';') {
-			bufputc(ob, '"');
-			i += 6;
-		} else {
+		#define REPLACE(pat,rep)\
+			if (i + sizeof(pat) <= size && !memcmp(src + i + 1, pat, sizeof(pat) - 1)) { bufputc(ob, rep); i += sizeof(pat); }
+
+		REPLACE("lt;", '<')
+		else REPLACE("gt;", '>')
+		else REPLACE("amp;", '&')
+		else REPLACE("#39;", '\'')
+		else REPLACE("#47;", '/')
+		else REPLACE("quot;", '"')
+		else {
 			bufputc(ob, src[i]);
 			i++;
 		}
+
+		#undef REPLACE
 	}
 }
