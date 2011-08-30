@@ -7,6 +7,7 @@
 #include "houdini.h"
 
 #define MAX_RENDER_RECURSION 16
+#define DEFAULT_STACK_SIZE 4 /* max two reallocs */
 
 typedef enum {
 	CRUSTACHE_NODE_MULTIROOT,
@@ -196,7 +197,7 @@ pool_grow(crustache_template *template)
 	pool_size = (size_t *)pool;
 
 	*pool_size = sizeof(size_t);
-	parr_push(&template->pool, pool);
+	stack_push(&template->pool, pool);
 }
 
 static void *
@@ -207,7 +208,7 @@ pool_alloc(crustache_template *template, node_t type, size_t size)
 	struct node *alloc;
 
 try_allocate:
-	pool = parr_top(&template->pool);
+	pool = stack_top(&template->pool);
 	pool_size = (size_t *)pool;
 
 	if (*pool_size + size > POOL_NODE_SIZE) {
@@ -308,11 +309,8 @@ find_mustache(
 		template->mustache_open.chars,
 		template->mustache_open.size);
 
-	if (mst_start == NULL) {
-		*mst_pos = size;
-		*mst_size = 0;
-		return 0;
-	}
+	if (mst_start == NULL)
+		return 0; /* no mustaches found */
 
 	mst_end = railgun(
 		buffer + i, size - i,
@@ -342,7 +340,7 @@ find_mustache(
 	*mst_pos = mst_start - buffer;
 	*mst_size = mst_end + template->mustache_close.size - mst_start;
 
-	return 0;
+	return 1; /* one mustache found */
 }
 
 static int
@@ -481,43 +479,41 @@ parse_internal(
 	size_t i = 0;
 	int error = 0;
 
-	struct parray node_stack;
+	struct stack node_stack;
 
-	parr_init(&node_stack);
-	parr_push(&node_stack, root_node);
+	stack_init(&node_stack, DEFAULT_STACK_SIZE);
+	stack_push(&node_stack, root_node);
 
 	while (error == 0 && i < size) {
 		size_t mst_pos, mst_size;
 		struct mustache mst;
 
 		error = find_mustache(&mst_pos, &mst_size, template, i, buffer, size);
-		if (error < 0)
+		if (error <= 0) /* failed, or no mustache found */
 			break;
+
+		if (mst_pos + mst_size) {
+
+		}
 
 		if (mst_pos > i) {
 			struct node_static *stnode;
 			struct node *old_root;
 
-			stnode = malloc(sizeof(struct node_static));
-			stnode->base.type = CRUSTACHE_NODE_STATIC;
-			stnode->base.next = NULL;
+			stnode = node_alloc(CRUSTACHE_NODE_STATIC, struct node_static);
+			if (stnode == NULL) {
+				error = CR_ENOMEM;
+				break;
+			}
 
 			stnode->str.ptr = buffer + i;
 			stnode->str.size = mst_pos - i;
 
-			if (stnode->str.ptr[0] == '\n') {
-				stnode->str.ptr++;
-				stnode->str.size--;
-			}
-
-			old_root = parr_pop(&node_stack);
+			old_root = stack_pop(&node_stack);
 			old_root->next = (struct node *)stnode;
 
-			parr_push(&node_stack, stnode);
+			stack_push(&node_stack, stnode);
 		}
-
-		if (mst_pos == size)
-			break;
 
 		error = parse_mustache(&mst,
 			buffer + mst_pos + template->mustache_open.size,
@@ -537,28 +533,32 @@ parse_internal(
 				struct node_fetch *section_key;
 				struct node *old_root, *child_root;
 
-				/* Child root */
+				/* Alloc child nodes */
 				child_root = node_alloc(CRUSTACHE_NODE_MULTIROOT, struct node);
-
-				/* Section key */
 				section_key = node_alloc(CRUSTACHE_NODE_FETCH, struct node_fetch);
+				section = node_alloc(CRUSTACHE_NODE_SECTION, struct node_section);
 
+				if (child_root == NULL || section_key == NULL || section == NULL) {
+					error = CR_ENOMEM;
+					break;
+				}
+
+				/* Parse section key */
 				if ((error = parse_mustache_name(&section_key->var, &mst)) < 0)
 					break;
 
-				/* Section node */
-				section = node_alloc(CRUSTACHE_NODE_SECTION, struct node_section);
+				/* Parse section node */
 				section->section_key = (struct node *)section_key;
 				section->content = child_root;
 				section->raw_content.ptr = buffer + i;
 				section->raw_content.size = 0;
 				section->inverted = (mst.modifier == '^');
 
-				old_root = parr_pop(&node_stack);
+				old_root = stack_pop(&node_stack);
 				old_root->next = (struct node *)section;
 
-				parr_push(&node_stack, section);
-				parr_push(&node_stack, child_root);
+				stack_push(&node_stack, section);
+				stack_push(&node_stack, child_root);
 				break;
 			}
 
@@ -567,11 +567,11 @@ parse_internal(
 				struct node_fetch *section_open_key;
 
 				/* pop the subtree */
-				parr_pop(&node_stack);
+				stack_pop(&node_stack);
 
 				/* top of the stack should now be the SECTION node that
 				 * was hosting the subtree */
-				section_open = parr_top(&node_stack);
+				section_open = stack_top(&node_stack);
 				if (!section_open || section_open->base.type != CRUSTACHE_NODE_SECTION) {
 					error = CR_EPARSE_MISMATCHED_SECTION;
 					break;
@@ -606,13 +606,18 @@ parse_internal(
 				}
 
 				partial = node_alloc(CRUSTACHE_NODE_PARTIAL, struct node_partial);
+				if (partial == NULL) {
+					error = CR_ENOMEM;
+					break;
+				}
+
 				if ((error = parse_mustache_name(&partial->partial_name, &mst)) < 0)
 					break;
 
 				/* push into stack */
-				old_root = parr_pop(&node_stack);
+				old_root = stack_pop(&node_stack);
 				old_root->next = (struct node *)partial;
-				parr_push(&node_stack, partial);
+				stack_push(&node_stack, partial);
 				break;
 			}
 
@@ -623,13 +628,20 @@ parse_internal(
 				struct node_fetch *tag_name;
 				struct node *old_root;
 
-				/* Section name */
+				/* Alloc nodes */
 				tag_name = node_alloc(CRUSTACHE_NODE_FETCH, struct node_fetch);
+				tag = node_alloc(CRUSTACHE_NODE_TAG, struct node_tag);
+
+				if (tag_name == NULL || tag == NULL) {
+					error = CR_ENOMEM;
+					break;
+				}
+
+				/* Parse tag name for fetching */
 				if ((error = parse_mustache_name(&tag_name->var, &mst)) < 0)
 					break;
 
-				/* actual tag */
-				tag = node_alloc(CRUSTACHE_NODE_TAG, struct node_tag);
+				/* Parse the actual tag */
 				tag->tag_value = (struct node *)tag_name;
 
 				switch (mst.modifier) {
@@ -647,9 +659,9 @@ parse_internal(
 				}
 
 				/* push into stack */
-				old_root = parr_pop(&node_stack);
+				old_root = stack_pop(&node_stack);
 				old_root->next = (struct node *)tag;
-				parr_push(&node_stack, tag);
+				stack_push(&node_stack, tag);
 				break;
 			}
 		} /* switch */
@@ -660,7 +672,7 @@ parse_internal(
 		}
 	}
 
-	parr_free(&node_stack);
+	stack_free(&node_stack);
 	return error;
 }
 
@@ -675,7 +687,7 @@ render_node(
 	struct buf *ob,
 	crustache_template *template,
 	struct node *node,
-	struct parray *context,
+	struct stack *context,
 	int depth);
 
 static void
@@ -690,7 +702,7 @@ render_node_partial(
 	struct buf *ob,
 	crustache_template *template,
 	struct node_partial *node,
-	struct parray *context,
+	struct stack *context,
 	int depth)
 {
 	int error;
@@ -721,7 +733,7 @@ render_node_fetch(
 	crustache_var *out,
 	crustache_template *template,
 	struct node_fetch *node,
-	struct parray *context)
+	struct stack *context)
 {
 	int i;
 
@@ -753,7 +765,7 @@ render_node_tag(
 	struct buf *ob,
 	crustache_template *template,
 	struct node_tag *node,
-	struct parray *context)
+	struct stack *context)
 {
 	crustache_var tag_value;
 	int error = 0;
@@ -804,7 +816,7 @@ render_node_section(
 	struct buf *ob,
 	crustache_template *template,
 	struct node_section *node,
-	struct parray *context,
+	struct stack *context,
 	int depth)
 {
 	crustache_var section_key = {0, 0, 0};
@@ -832,9 +844,9 @@ render_node_section(
 			break;
 
 		case CRUSTACHE_VAR_CONTEXT:
-			parr_push(context, &section_key);
+			stack_push(context, &section_key);
 			result = render_node(ob, template, node->content, context, depth);
-			parr_pop(context);
+			stack_pop(context);
 			break;
 
 		case CRUSTACHE_VAR_LIST:
@@ -849,9 +861,9 @@ render_node_section(
 					break;
 				}
 
-				parr_push(context, &subcontext);
+				stack_push(context, &subcontext);
 				result = render_node(ob, template, node->content, context, depth);
-				free_var(template, parr_pop(context));
+				free_var(template, stack_pop(context));
 			}
 			break;
 		}
@@ -893,11 +905,11 @@ render_node(
 	struct buf *ob,
 	crustache_template *template,
 	struct node *node,
-	struct parray *context,
+	struct stack *context,
 	int depth)
 {
 	int result = 0;
-	int context_size;
+	size_t context_size;
 
 	crustache_var *ctx;
 
@@ -906,7 +918,7 @@ render_node(
 		return CR_ERENDER_TOO_DEEP;
 	}
 
-	ctx = parr_top(context);
+	ctx = stack_top(context);
 	if (ctx == NULL || ctx->type != CRUSTACHE_VAR_CONTEXT) {
 		template->error_node = node;
 		return CR_ERENDER_INVALID_CONTEXT;
@@ -939,6 +951,7 @@ render_node(
 		node = node->next;
 	}
 
+	/* the stack should come out as it came in */
 	assert(context->size == context_size);
 	return result;
 }
@@ -947,12 +960,12 @@ int
 crustache_render(struct buf *ob, crustache_template *template, crustache_var *context)
 {
 	int error;
-	struct parray context_stack;
+	struct stack context_stack;
 
-	parr_init(&context_stack);
-	parr_push(&context_stack, context);
+	stack_init(&context_stack, DEFAULT_STACK_SIZE);
+	stack_push(&context_stack, context);
 	error = render_node(ob, template, &template->root, &context_stack, 0);
-	parr_free(&context_stack);
+	stack_free(&context_stack);
 
 	return error;
 }
@@ -970,7 +983,7 @@ crustache_new(
 
 	crt = malloc(sizeof(crustache_template));
 	if (!crt)
-		return -1;
+		return CR_ENOMEM;
 
 	memset(crt, 0x0, sizeof(crustache_template));
 
@@ -978,6 +991,12 @@ crustache_new(
 
 	crt->raw_content.ptr = malloc(raw_length);
 	crt->raw_content.size = raw_length;
+
+	if (crt->raw_content.ptr == NULL) {
+		free(crt);
+		return CR_ENOMEM;
+	}
+
 	memcpy(crt->raw_content.ptr, raw_template, raw_length);
 
 	crt->mustache_open.chars = MUSTACHE_OPEN;
@@ -1091,7 +1110,7 @@ crustache_error_rendernode(char *buffer, size_t size, crustache_template *templa
 const char *
 crustache_strerror(int error)
 {
-	static const int SMALLEST_ERROR = CR_ERENDER_BAD_PARTIAL;
+	static const int SMALLEST_ERROR = CR_ENOMEM;
 	static const char *ERRORS[] = {
 		NULL,
 		"Mismatched bracers in mustache tag",
@@ -1105,6 +1124,8 @@ crustache_strerror(int error)
 		"The given object is not a valid Mustache context",
 		"A template variable could not be found on the active context",
 		"The given Partial template is broken",
+
+		"Out of memory",
 	};
 
 	if (error >= 0 || error < SMALLEST_ERROR)

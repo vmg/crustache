@@ -2,7 +2,7 @@
 #define __CRUSTACHE_H__
 
 #include "buffer.h"
-#include "array.h"
+#include "stack.h"
 
 typedef enum {
 	CRUSTACHE_OK = 0,
@@ -18,6 +18,8 @@ typedef enum {
 	CR_ERENDER_INVALID_CONTEXT = -8,
 	CR_ERENDER_NOT_FOUND = -9,
 	CR_ERENDER_BAD_PARTIAL = -10,
+
+	CR_ENOMEM = -11,
 } crustache_error_t;
 
 typedef enum {
