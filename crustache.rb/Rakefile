@@ -10,8 +10,8 @@ desc 'Gather required sources into extension directory'
 task :gather do |t|
   files =
     FileList[
-      '../src/{buffer,stack,houdini,crustache}.h',
-      '../src/{buffer,stack,houdini,crustache}.c',
+      '../src/{buffer,stack,houdini,html_unescape,crustache}.h',
+      '../src/{buffer,stack,houdini_html,crustache}.c',
     ]
   cp files, 'ext/crustache/',
     :preserve => true,

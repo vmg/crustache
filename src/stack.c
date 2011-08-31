@@ -29,7 +29,10 @@ stack_free(struct stack *st)
 		return;
 
 	free(st->item);
-	stack_init(st);
+
+	st->item = NULL;
+	st->size = 0;
+	st->asize = 0;
 }
 
 int
