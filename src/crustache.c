@@ -332,7 +332,7 @@ find_mustache(
 
 	/* Greedy matching */
 	if (mst_end + 1 == railgun(
-		mst_end + 1, buffer - mst_end,
+		mst_end + 1, buffer + size - mst_end - 1,
 		template->mustache_close.chars,
 		template->mustache_close.size))
 		mst_end = mst_end + 1;
