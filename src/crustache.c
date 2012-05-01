@@ -723,7 +723,7 @@ render_node_partial(
 		template->error_node = (struct node *)node;
 
 	if (template->api.free_partials)
-		crustache_template_free(partial);
+		crustache_free(partial);
 
 	return error;
 }
