@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 /* MSVC compat */
 #if defined(_MSC_VER)
